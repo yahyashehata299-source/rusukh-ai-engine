@@ -10,6 +10,7 @@ export interface Card {
   tags: string[];
   provenance: { page: number; snippet: string };
   confidence: number;
+  needsEnhancement?: boolean;
 }
 
 function escapeForCloze(term: string): string {
@@ -17,25 +18,90 @@ function escapeForCloze(term: string): string {
 }
 
 function chooseCardType(concept: BlueprintConcept): "cloze" | "qa" {
-  if (concept.type === "definition" || concept.type === "pillar" || concept.type === "category") return "cloze";
-  if (concept.type === "ruling" || concept.type === "difference" || concept.type === "evidence") return "qa";
+  if (concept.type === "definition" || concept.type === "pillar" || concept.type === "category")
+    return "cloze";
+  if (concept.type === "ruling" || concept.type === "difference" || concept.type === "evidence")
+    return "qa";
   return concept.importance >= 0.9 ? "cloze" : "qa";
 }
 
-function synthesizeExplanation(concept: BlueprintConcept): string {
-  // Minimal teacher-style explanation scaffold using context + snippet
-  const meaning = `ماذا يعني: ${concept.snippet}`;
-  const why = `لما��ا: يُستدلُّ على هذا لأنّ... (راجع السّياق)`;
-  const how = `كيف يُطبَّق: في الحالات العملية مثل ...`;
-  const misunderstanding = `مفارقة شائعة: لا تخلط بين ...`;
-  const important = `أهميّة: مهم لحفظ وجوب/تفريع في ...`;
-  return [meaning, why, how, misunderstanding, important].join("\n");
+// Extract deterministic explanation ONLY from source context
+function synthesizeExplanation(concept: BlueprintConcept): { explanation: string; needsEnhancement: boolean } {
+  const parts: string[] = [];
+  let needsEnhancement = false;
+
+  // What: From the snippet itself
+  if (concept.snippet && concept.snippet.length > 0) {
+    const what = `ماذا: ${concept.snippet.substring(0, 200)}`;
+    parts.push(what);
+  }
+
+  // Why/Basis: From context if available
+  if (concept.context && concept.context.length > 0) {
+    const context = concept.context.substring(0, 300);
+    const why = `السياق: ${context}`;
+    parts.push(why);
+  }
+
+  // Type-specific derived explanations (all deterministic from source)
+  if (concept.type === "definition" && concept.title) {
+    parts.push(`التعريف الأساسي: ${concept.title}`);
+  }
+
+  if (concept.type === "ruling") {
+    // Extract ruling direction if possible
+    const rulingMatch = concept.snippet.match(/(?:واجب|مندوب|مكروه|حرام|مباح)/);
+    if (rulingMatch) {
+      parts.push(`الحكم الشرعي: ${rulingMatch[0]}`);
+    }
+  }
+
+  if (concept.type === "pillar" || concept.type === "condition") {
+    parts.push(`مكون أساسي: ${concept.snippet.substring(0, 150)}`);
+  }
+
+  if (concept.type === "evidence") {
+    const quranic = concept.snippet.match(/(سورة|آية|الآية)\s+([^\n]+)/i);
+    const hadith = concept.snippet.match(/(حديث|حديث)\s+([^\n]+)/i);
+
+    if (quranic) {
+      parts.push(`دليل قرآني: ${quranic[0].substring(0, 100)}`);
+    } else if (hadith) {
+      parts.push(`دليل حديثي: ${hadith[0].substring(0, 100)}`);
+    } else {
+      parts.push(`دليل من المصدر: ${concept.snippet.substring(0, 100)}`);
+    }
+  }
+
+  if (concept.type === "example") {
+    parts.push(`مثال عملي: ${concept.snippet.substring(0, 150)}`);
+  }
+
+  if (concept.type === "difference") {
+    parts.push(`نقطة تمييز: ${concept.snippet.substring(0, 150)}`);
+  }
+
+  if (concept.type === "category") {
+    parts.push(`تصنيف: ${concept.snippet.substring(0, 150)}`);
+  }
+
+  // If we have minimal information, mark for enhancement
+  if (parts.length < 2) {
+    needsEnhancement = true;
+  }
+
+  const explanation = parts.join("\n\n");
+  return { 
+    explanation: explanation.length > 0 ? explanation : "معلومات من المصدر متاحة في البطاقة.",
+    needsEnhancement 
+  };
 }
 
 export function generateCards(blueprint: BlueprintConcept[]): Card[] {
   const cards: Card[] = [];
+
   for (const c of blueprint) {
-    // Skip low-importance concepts by default
+    // Skip very low-importance concepts
     if (c.importance < 0.5) continue;
 
     const cardType = chooseCardType(c);
@@ -43,64 +109,112 @@ export function generateCards(blueprint: BlueprintConcept[]): Card[] {
     let back = "";
 
     if (cardType === "cloze") {
-      // try to get a short canonical term
-      const term = c.canonical || extractTermFromSnippet(c.snippet) || c.snippet.split(" ").slice(0,3).join(" ");
-      front = c.snippet.replace(term, escapeForCloze(term));
+      // Cloze deletion: blank out the term
+      const term = c.title || c.canonical || extractTermFromSnippet(c.snippet) || c.snippet.split(" ").slice(0, 3).join(" ");
+      front = c.snippet.replace(new RegExp(`\\b${escapeRegex(term)}\\b`, "g"), escapeForCloze(term));
       back = term;
     } else {
-      // QA
+      // QA format
       const q = questionForConcept(c);
       front = q;
-      back = extractAnswerFromSnippet(c.snippet) || c.snippet;
+      back = extractAnswerFromSnippet(c.snippet) || c.snippet.substring(0, 200);
     }
 
-    const explanation = synthesizeExplanation(c);
+    const { explanation, needsEnhancement } = synthesizeExplanation(c);
     const example = extractExampleFromContext(c.context || "") || undefined;
 
-    cards.push({
+    const card: Card = {
       id: uuidv4(),
       front,
       back,
       explanation,
       example,
-      tags: [c.type],
+      tags: [c.type, `confidence:${Math.round(c.confidence * 100)}`],
       provenance: { page: c.page, snippet: c.snippet },
-      confidence: c.confidence
-    });
+      confidence: c.confidence,
+    };
+
+    if (needsEnhancement) {
+      card.needsEnhancement = true;
+    }
+
+    cards.push(card);
   }
+
   return cards;
 }
 
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function extractTermFromSnippet(sn: string): string | null {
-  // heuristics: term before colon or right after 'تعريف' or 'معنى'
-  let m = sn.match(/^(.*?)[:\-]/);
-  if (m && m[1]) return m[1].trim().split(" ").slice(0,5).join(" ");
-  m = sn.match(/معنى\s+([^:]+)[:\-]/i);
+  // Heuristic: term before colon or after تعريف/معنى
+  let m = sn.match(/^([^:\-\n]{3,80})[:\-]/);
+  if (m && m[1]) {
+    const term = m[1].trim();
+    if (term.length > 2 && term.length < 80) return term;
+  }
+
+  m = sn.match(/(?:معنى|تعريف)\s+(?:الـ)?([^:\-\n]{3,80})/i);
   if (m && m[1]) return m[1].trim();
+
   return null;
 }
 
 function questionForConcept(c: BlueprintConcept): string {
-  if (c.type === "ruling") return `ما حكم ${shorten(c.snippet, 40)}؟`;
-  if (c.type === "evidence") return `ما الدليل المتقدّم؟`;
+  if (c.type === "ruling") {
+    const ruling = c.title || shorten(c.snippet, 40);
+    return `ما حكم ${ruling}؟`;
+  }
+
+  if (c.type === "evidence") {
+    return `ما الدليل المذكور؟`;
+  }
+
+  if (c.type === "difference") {
+    return `ما الفرق المقصود؟`;
+  }
+
+  if (c.type === "definition") {
+    const term = c.title || shorten(c.snippet, 40);
+    return `ما تعريف: ${term}؟`;
+  }
+
+  if (c.type === "example") {
+    return `ما المثال المعطى؟`;
+  }
+
+  // Default question
   return `ما معنى: ${shorten(c.snippet, 60)}؟`;
 }
 
 function extractAnswerFromSnippet(sn: string): string | null {
-  // attempt to strip leading phrase like 'حكم: ...' or extract clause after 'هو' or ':'
-  const m = sn.match(/(?:هو|هي|:|\-)(.*)$/i);
-  if (m && m[1]) return m[1].trim();
-  return null;
+  // Try to find answer after specific markers
+  let m = sn.match(/(?:بأنه|هو|هي|:|\-)\s*(.+?)(?=\n|$)/i);
+  if (m && m[1]) {
+    const ans = m[1].trim();
+    if (ans.length > 3) return ans.substring(0, 250);
+  }
+
+  // Otherwise return first 200 chars
+  return sn.substring(0, 200);
 }
 
-function shorten(s: string, max = 80) {
+function shorten(s: string, max = 80): string {
   if (s.length <= max) return s;
-  return s.slice(0, max - 3) + '...';
+  return s.substring(0, max - 3) + "...";
 }
 
 function extractExampleFromContext(ctx: string): string | null {
   if (!ctx) return null;
-  const m = ctx.match(/مثال[:\-]?(.*)$/i);
-  if (m && m[1]) return m[1].trim();
+
+  // Look for example markers
+  const m = ctx.match(/(?:مثال|أمثلة)[:\-]?\s*([^\n]+)/i);
+  if (m && m[1]) {
+    const ex = m[1].trim();
+    if (ex.length > 3) return ex.substring(0, 200);
+  }
+
   return null;
 }
