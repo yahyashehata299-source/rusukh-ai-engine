@@ -1,5 +1,5 @@
 import fs from "fs";
-import stringify from "csv-stringify/lib/sync";
+import { stringify } from "csv-stringify/sync";
 import { Card } from "./generator";
 
 export function exportJsonlCsv(cards: Card[], outPath: string) {
