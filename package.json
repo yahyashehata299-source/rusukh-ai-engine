@@ -6,7 +6,8 @@
   "scripts": {
     "start": "ts-node --esm src/index.ts",
     "build": "tsc",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "validate": "node --experimental-vm-modules scripts/validate.mjs"
   },
   "dependencies": {
     "uuid": "^9.0.0",
